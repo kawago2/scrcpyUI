@@ -34,6 +34,11 @@ const App = {
       if (chip && menu && !chip.contains(e.target)) {
         menu.classList.remove('open');
       }
+      const verChip = document.getElementById('versionChip');
+      const verMenu = document.getElementById('customVersionMenu');
+      if (verChip && verMenu && !verChip.contains(e.target)) {
+        verMenu.classList.remove('open');
+      }
     });
   },
 
@@ -493,6 +498,8 @@ const App = {
   },
 
   latestUpdateUrl: '',
+  availableReleases: [],
+  currentScrcpyVer: '',
 
   async checkScrcpyUpdate() {
     const modal = document.getElementById('updateModal');
@@ -503,7 +510,7 @@ const App = {
 
     title.innerText = I18nManager.t('updateTitle');
     subtitle.innerText = I18nManager.t('updateSubtitleChecking');
-    content.innerHTML = `<span style="color: var(--text-sub);">${I18nManager.t('updateChecking')}</span>`;
+    content.innerHTML = '<span style="color: var(--text-sub);">' + I18nManager.t('updateChecking') + '</span>';
     btn.style.display = 'none';
     btn.onclick = () => this.applyScrcpyUpdate();
     modal.classList.add('open');
@@ -512,43 +519,98 @@ const App = {
       const res = await window.pywebview.api.check_scrcpy_update();
       if (!res.has_update && res.message && !res.current_version) {
         subtitle.innerText = I18nManager.t('updateCheckFailed');
-        content.innerHTML = `<span style="color: #ef4444;">${res.message}</span>`;
+        content.innerHTML = '<span style="color: #ef4444;">' + res.message + '</span>';
         return;
       }
 
-      if (!res.has_update) {
-        subtitle.innerText = I18nManager.t('updateUpToDateSub', { version: res.current_version });
-        content.innerHTML = `
-          <div style="color: #22c55e; font-weight: 700; margin-bottom: 6px;">${I18nManager.t('updateUpToDateTitle')}</div>
-          <div>${I18nManager.t('updateUpToDateDesc', { version: res.current_version })}</div>
-        `;
-        return;
+      this.currentScrcpyVer = res.current_version;
+      this.availableReleases = res.available_releases || [];
+      if (this.availableReleases.length === 0 && res.download_url) {
+        this.availableReleases = [{
+          version: res.latest_version,
+          tag: 'v' + res.latest_version,
+          download_url: res.download_url,
+          release_notes: res.release_notes
+        }];
       }
 
-      this.latestUpdateUrl = res.download_url;
-      subtitle.innerText = res.current_version === "Belum terpasang" 
-        ? I18nManager.t('updateNotInstalled') 
-        : I18nManager.t('updateNewFound', { version: res.latest_version });
-
-      const versionCompareText = I18nManager.t('updateVersionCompare', {
-        current: res.current_version === "Belum terpasang" ? I18nManager.t('updateNotInstalled') : `v${res.current_version}`,
-        latest: `v${res.latest_version}`
-      });
-
-      content.innerHTML = `
-        <div style="margin-bottom: 6px;">${versionCompareText}</div>
-        <div style="font-size: 11px; color: var(--text-sub); white-space: pre-wrap; font-family: monospace; background: var(--bg-card); padding: 8px; border-radius: 6px;">${res.release_notes}</div>
-      `;
-      btn.style.display = 'inline-block';
-      btn.innerText = res.current_version === "Belum terpasang" 
-        ? I18nManager.t('updateBtnInstallAuto') 
-        : I18nManager.t('updateBtnUpdateTo', { version: res.latest_version });
+      this.renderUpdateReleases(this.availableReleases[0]?.version || res.latest_version);
     } catch (e) {
-      subtitle.innerText = "Error";
-      content.innerHTML = `<span style="color: #ef4444;">${e}</span>`;
+      subtitle.innerText = 'Error';
+      content.innerHTML = '<span style="color: #ef4444;">' + e + '</span>';
     }
   },
 
+  toggleVersionDropdown(event) {
+    if (event) event.stopPropagation();
+    const menu = document.getElementById('customVersionMenu');
+    if (menu) menu.classList.toggle('open');
+  },
+
+  renderUpdateReleases(selectedVer) {
+    const subtitle = document.getElementById('updateModalSubtitle');
+    const content = document.getElementById('updateModalContent');
+    const btn = document.getElementById('btnApplyUpdate');
+
+    const curr = (this.currentScrcpyVer === 'Belum terpasang' || this.currentScrcpyVer === '0.0') ? 'Belum terpasang' : this.currentScrcpyVer;
+    const rel = this.availableReleases.find(r => r.version === selectedVer) || this.availableReleases[0];
+    if (!rel) return;
+
+    this.latestUpdateUrl = rel.download_url;
+    subtitle.innerText = (curr === 'Belum terpasang') 
+      ? I18nManager.t('updateNotInstalled') 
+      : 'Pilih versi Scrcpy yang ingin digunakan:';
+
+    const isCurrent = (curr === rel.version);
+    let itemsHtml = '';
+    this.availableReleases.forEach(r => {
+      const isSel = (r.version === rel.version) ? 'active' : '';
+      const tagText = (r.version === this.availableReleases[0]?.version) ? ' (Latest)' : '';
+      itemsHtml += '<div class="custom-select-item ' + isSel + '" onclick="App.onScrcpyVersionChange(\'' + r.version + '\', event)">' +
+        '<span>v' + r.version + tagText + '</span>' +
+        (isSel ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>' : '') +
+      '</div>';
+    });
+
+    const isV5 = rel.version.startsWith('5');
+    const versionBadge = isV5 
+      ? '<span style="background: rgba(59, 130, 246, 0.15); color: #2563eb; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> v5.x Engine (Hardware Decoding D3D11VA/Auto)</span>'
+      : '<span style="background: rgba(100, 116, 139, 0.15); color: #475569; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> v4.x Engine (Classic/Software Decoding)</span>';
+
+    content.innerHTML = 
+      '<div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">' +
+        '<div style="font-size: 12px;">Versi lokal: <b style="color: var(--primary); font-size: 13px;">' + (curr === 'Belum terpasang' ? curr : 'v' + curr) + '</b></div>' +
+        '<div style="display: flex; align-items: center; gap: 8px;">' +
+          '<span style="font-weight: 600; font-size: 12px; color: var(--text-dark);">Pilih Versi:</span>' +
+          '<div class="custom-select-chip" id="versionChip" onclick="App.toggleVersionDropdown(event)">' +
+            '<span id="selectedVersionText" style="font-size: 12px; font-weight: 600;">v' + rel.version + (rel.version === this.availableReleases[0]?.version ? ' (Latest)' : '') + '</span>' +
+            '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>' +
+            '<div class="custom-select-menu" id="customVersionMenu">' +
+              itemsHtml +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="margin-bottom: 10px;">' + versionBadge + '</div>' +
+      '<div style="font-size: 11px; color: var(--text-sub); white-space: pre-wrap; font-family: monospace; background: var(--bg-card); padding: 10px; border-radius: var(--radius-sm); max-height: 180px; overflow-y: auto; border: 1px solid var(--border-card); line-height: 1.5;">' +
+        (rel.release_notes || 'Tidak ada catatan rilis.') +
+      '</div>';
+
+    btn.style.display = 'inline-block';
+    if (isCurrent) {
+      btn.innerText = 'Instal Ulang v' + rel.version;
+    } else {
+      btn.innerText = (curr === 'Belum terpasang') ? 'Install v' + rel.version : 'Ganti/Update ke v' + rel.version;
+    }
+  },
+
+  onScrcpyVersionChange(newVer, event) {
+    if (event) event.stopPropagation();
+    const menu = document.getElementById('customVersionMenu');
+    if (menu) menu.classList.remove('open');
+    this.renderUpdateReleases(newVer);
+  },
+  
   closeUpdateModal() {
     document.getElementById('updateModal').classList.remove('open');
   },

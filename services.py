@@ -13,12 +13,14 @@ from typing import List, Dict, Optional, Any
 NO_WINDOW_FLAG = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 def kill_scrcpy_process():
-    """Kill running scrcpy instances across Windows, macOS, and Linux"""
+    """Kill running scrcpy and adb instances across Windows, macOS, and Linux"""
     try:
         if sys.platform == "win32":
             subprocess.run(["taskkill.exe", "/F", "/IM", "scrcpy.exe"], capture_output=True, creationflags=NO_WINDOW_FLAG)
+            subprocess.run(["taskkill.exe", "/F", "/IM", "adb.exe"], capture_output=True, creationflags=NO_WINDOW_FLAG)
         else:
             subprocess.run(["pkill", "-f", "scrcpy"], capture_output=True)
+            subprocess.run(["pkill", "-f", "adb"], capture_output=True)
     except Exception:
         pass
 
@@ -254,8 +256,32 @@ class ScrcpyService(IScrcpyService):
     def __init__(self, binary_path: str):
         self.bin = binary_path
 
+    def _get_major_version(self) -> int:
+        try:
+            extra_kwargs = {"creationflags": NO_WINDOW_FLAG} if sys.platform == "win32" else {}
+            res = subprocess.run(
+                [self.bin, "--version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=3,
+                **extra_kwargs
+            )
+            first_line = res.stdout.strip().splitlines()[0]
+            parts = first_line.split()
+            if len(parts) >= 2:
+                ver_str = parts[1].lstrip('v')
+                return int(ver_str.split('.')[0])
+        except Exception:
+            pass
+        return 5
+
     def _build_args(self, mode: str, stay_awake: bool = False, turn_screen_off: bool = False, quality: str = "balanced") -> List[str]:
+        major = self._get_major_version()
         base_args = ["--video-codec=h264"]
+        if major >= 5 and mode in ["usb", "wifi"]:
+            # scrcpy v5+ introduces native hardware decoding option
+            base_args.append("--hwdec=auto")
         quality_map = {
             "low": {"size": "720", "bitrate": "4M", "fps": "60"},
             "balanced": {"size": "1080", "bitrate": "8M", "fps": "60"},
@@ -313,7 +339,13 @@ class ScrcpyService(IScrcpyService):
         bin_target = self.bin
         if not os.path.exists(bin_target):
             import shutil
-            found = shutil.which("scrcpy") or ("/opt/homebrew/bin/scrcpy" if os.path.exists("/opt/homebrew/bin/scrcpy") else None)
+            candidates = [
+                os.path.join(os.path.dirname(sys.executable), "bin", "scrcpy.exe" if sys.platform == "win32" else "scrcpy"),
+                os.path.join(os.path.dirname(sys.executable), "scrcpy.exe" if sys.platform == "win32" else "scrcpy"),
+                shutil.which("scrcpy"),
+                "/opt/homebrew/bin/scrcpy" if os.path.exists("/opt/homebrew/bin/scrcpy") else None
+            ]
+            found = next((p for p in candidates if p and os.path.exists(p)), None)
             if found:
                 self.bin = found
                 bin_target = found
@@ -367,7 +399,7 @@ class ScrcpyService(IScrcpyService):
 
 
 class ScrcpyUpdaterService(IUpdaterService):
-    GITHUB_API = "https://api.github.com/repos/Genymobile/scrcpy/releases/latest"
+    GITHUB_API = "https://api.github.com/repos/Genymobile/scrcpy/releases?per_page=20"
 
     def __init__(self, base_dir: str, scrcpy_bin: str):
         self.base_dir = base_dir
@@ -458,18 +490,40 @@ class ScrcpyUpdaterService(IUpdaterService):
             with urllib.request.urlopen(req, timeout=10) as response:
                 if response.status != 200:
                     return {"has_update": False, "message": "Gagal terhubung ke GitHub API."}
-                data = json.loads(response.read().decode('utf-8'))
+                releases_data = json.loads(response.read().decode('utf-8'))
 
-            latest_tag = data.get("tag_name", "").lstrip("v")
-            body_notes = data.get("body", "")
+            if not isinstance(releases_data, list):
+                releases_data = [releases_data]
 
-            download_url = None
-            if sys.platform == "win32":
-                for asset in data.get("assets", []):
-                    name = asset.get("name", "").lower()
-                    if "win64" in name and name.endswith(".zip"):
-                        download_url = asset.get("browser_download_url")
-                        break
+            available_releases = []
+            for rel in releases_data:
+                tag = rel.get("tag_name", "").lstrip("v")
+                dl = None
+                if sys.platform == "win32":
+                    for asset in rel.get("assets", []):
+                        name = asset.get("name", "").lower()
+                        if "win64" in name and name.endswith(".zip"):
+                            dl = asset.get("browser_download_url")
+                            break
+                elif sys.platform == "darwin":
+                    dl = "brew_upgrade"
+                else:
+                    dl = "linux"
+
+                if dl:
+                    available_releases.append({
+                        "version": tag,
+                        "tag": rel.get("tag_name", ""),
+                        "download_url": dl,
+                        "release_notes": (rel.get("body", "") or "")[:500],
+                        "prerelease": rel.get("prerelease", False)
+                    })
+
+            if not available_releases:
+                return {"has_update": False, "message": "Tidak ada rilis yang cocok ditemukan."}
+
+            latest_rel = available_releases[0]
+            latest_tag = latest_rel["version"]
 
             def _parse_version(v_str):
                 clean = ''.join(c for c in v_str if c.isdigit() or c == '.')
@@ -485,11 +539,12 @@ class ScrcpyUpdaterService(IUpdaterService):
 
             return {
                 "has_update": is_newer,
-                "platform": "win32",
+                "platform": sys.platform,
                 "current_version": curr_ver,
                 "latest_version": latest_tag,
-                "release_notes": body_notes[:400] if body_notes else "",
-                "download_url": download_url,
+                "release_notes": latest_rel.get("release_notes", ""),
+                "download_url": latest_rel.get("download_url", ""),
+                "available_releases": available_releases,
                 "action_label": f"Update ke v{latest_tag}"
             }
         except Exception as e:
@@ -583,8 +638,21 @@ class ScrcpyUpdaterService(IUpdaterService):
                 if item.lower() in ["scrcpystudio.exe", "ui", "app_icon.ico", "installer.iss", "scrcpy_studio.py", "services.py"]:
                     continue
                 if os.path.isfile(s):
-                    shutil.copy2(s, d)
-                    updated_files.append(item)
+                    try:
+                        shutil.copy2(s, d)
+                        updated_files.append(item)
+                    except PermissionError:
+                        # If a file like adb.exe is currently locked by system, kill adb again and retry once
+                        kill_scrcpy_process()
+                        import time
+                        time.sleep(0.3)
+                        try:
+                            shutil.copy2(s, d)
+                            updated_files.append(item)
+                        except Exception:
+                            # If adb is still busy, skip overwriting adb.exe (scrcpy engine files are what matter)
+                            if "adb" not in item.lower():
+                                raise
 
             if os.path.exists(temp_zip):
                 os.remove(temp_zip)

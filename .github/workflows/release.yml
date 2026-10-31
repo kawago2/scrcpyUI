@@ -1,9 +1,10 @@
 name: Release Build & Publish
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+  # push:
+  #   tags:
+  #     - 'v*'
 
 permissions:
   contents: write
@@ -72,6 +73,7 @@ jobs:
             --name "ScrcpyStudio" `
             --icon "app_icon.ico" `
             --add-data "ui;ui" `
+            --collect-all "webview" `
             scrcpy_studio.py
 
       - name: Compile Inno Setup Installer

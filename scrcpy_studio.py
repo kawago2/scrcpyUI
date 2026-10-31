@@ -4,6 +4,32 @@ import json
 from typing import List, Dict, Any
 import webview
 
+# Fix pywebview WinForms/EdgeChromium backend looking for architecture runtimes in frozen PyInstaller bundles
+if sys.platform == 'win32':
+    try:
+        import webview.util as _wvu
+        _orig_interop_dll_path = _wvu.interop_dll_path
+
+        def _patched_interop_dll_path(name: str) -> str:
+            try:
+                return _orig_interop_dll_path(name)
+            except FileNotFoundError:
+                base = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+                candidates = [
+                    os.path.join(base, 'webview', 'lib', 'runtimes', name, 'native'),
+                    os.path.join(base, 'webview', 'lib', name),
+                    os.path.join(base, 'runtimes', name, 'native'),
+                    os.path.join(base, name),
+                ]
+                for c in candidates:
+                    if os.path.exists(c):
+                        return c
+                return os.path.join(base, name)
+
+        _wvu.interop_dll_path = _patched_interop_dll_path
+    except Exception:
+        pass
+
 from services import (
     IADBService,
     IScrcpyService,
@@ -16,25 +42,35 @@ from airplay_service import AirPlayService
 
 # Path Resolution
 if getattr(sys, "frozen", False):
-    # PyInstaller extracts bundled data to _MEIPASS, or inside .app/Contents/Resources
+    APP_DIR = os.path.dirname(sys.executable)
     if hasattr(sys, "_MEIPASS"):
+        # Temporary extraction directory for UI & internal assets
         BASE_DIR = sys._MEIPASS
     else:
-        app_dir = os.path.dirname(sys.executable)
-        resources_dir = os.path.join(os.path.dirname(app_dir), "Resources")
-        BASE_DIR = resources_dir if os.path.exists(os.path.join(resources_dir, "ui")) else app_dir
+        resources_dir = os.path.join(os.path.dirname(APP_DIR), "Resources")
+        BASE_DIR = resources_dir if os.path.exists(os.path.join(resources_dir, "ui")) else APP_DIR
 else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = APP_DIR
 
-BIN_DIR = os.path.join(BASE_DIR, "bin")
+# Check bin directory both inside installed app directory and bundled directory
+BIN_DIR = os.path.join(APP_DIR, "bin") if os.path.exists(os.path.join(APP_DIR, "bin")) else os.path.join(BASE_DIR, "bin")
 
 def resolve_binary(name: str) -> str:
-    # 1. Check bin/ subdirectory
-    in_bin = os.path.join(BIN_DIR, f"{name}.exe" if sys.platform == "win32" else name)
+    exe_name = f"{name}.exe" if sys.platform == "win32" else name
+    # 1. Check installed app bin/ directory (e.g. {app}\bin\scrcpy.exe)
+    in_app_bin = os.path.join(APP_DIR, "bin", exe_name)
+    if os.path.exists(in_app_bin):
+        return in_app_bin
+    # 2. Check base_dir bin/ subdirectory
+    in_bin = os.path.join(BIN_DIR, exe_name)
     if os.path.exists(in_bin):
         return in_bin
-    # 2. Check root directory
-    in_root = os.path.join(BASE_DIR, f"{name}.exe" if sys.platform == "win32" else name)
+    # 3. Check root directory of app and base
+    in_app_root = os.path.join(APP_DIR, exe_name)
+    if os.path.exists(in_app_root):
+        return in_app_root
+    in_root = os.path.join(BASE_DIR, exe_name)
     if os.path.exists(in_root):
         return in_root
     # 3. Check macOS common brew and sdk paths directly
@@ -153,7 +189,7 @@ class AppController:
         if res.get("success"):
             global SCRCPY_BIN
             SCRCPY_BIN = resolve_binary("scrcpy")
-            self._scrcpy.scrcpy_bin = SCRCPY_BIN
+            self._scrcpy.bin = SCRCPY_BIN
         return res
 
     def send_key(self, keycode: str, device_id: str = "") -> str:
@@ -186,14 +222,58 @@ class AppController:
         """Restart application process cleanly"""
         import sys
         import os
-        python = sys.executable
-        os.execl(python, python, *sys.argv)
+        import subprocess
+        import threading
+
+        if getattr(sys, 'frozen', False):
+            # Write a small detached batch script that waits for current PID to exit completely,
+            # then starts ScrcpyStudio.exe fresh. This eliminates any 'Failed to remove temporary directory' warning.
+            current_pid = os.getpid()
+            exe_path = sys.executable
+            vbs_restart = os.path.join(os.path.dirname(exe_path), "restart_studio.vbs")
+            bat_restart = os.path.join(os.path.dirname(exe_path), "restart_studio.bat")
+            try:
+                with open(bat_restart, "w", encoding="utf-8") as bf:
+                    bf.write(f"""@echo off
+:WAIT_PID
+timeout /t 1 /nobreak >nul
+tasklist /fi "PID eq {current_pid}" | find "{current_pid}" >nul
+if not errorlevel 1 goto WAIT_PID
+timeout /t 1 /nobreak >nul
+start "" "{exe_path}"
+del "%~f0"
+""")
+                if sys.platform == "win32":
+                    subprocess.Popen(
+                        ["cmd.exe", "/c", bat_restart],
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008, # DETACHED_PROCESS
+                        close_fds=True
+                    )
+                else:
+                    subprocess.Popen([exe_path] + sys.argv[1:])
+            except Exception:
+                subprocess.Popen([exe_path] + sys.argv[1:])
+
+            def _clean_exit():
+                import time
+                time.sleep(0.1)
+                if self._window:
+                    try:
+                        self._window.destroy()
+                    except Exception:
+                        pass
+                sys.exit(0)
+
+            threading.Thread(target=_clean_exit, daemon=True).start()
+        else:
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
 
 
 def main():
     adb_service = ADBService(ADB_BIN)
     scrcpy_service = ScrcpyService(SCRCPY_BIN)
-    updater_service = ScrcpyUpdaterService(BASE_DIR, SCRCPY_BIN)
+    updater_service = ScrcpyUpdaterService(APP_DIR, SCRCPY_BIN)
     airplay_service = AirPlayService()
     controller = AppController(adb_service, scrcpy_service, updater_service, airplay_service)
 
