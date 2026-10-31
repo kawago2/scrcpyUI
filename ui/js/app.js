@@ -34,6 +34,11 @@ const App = {
       if (chip && menu && !chip.contains(e.target)) {
         menu.classList.remove('open');
       }
+      const hwChip = document.getElementById('hwdecChip');
+      const hwMenu = document.getElementById('customHwdecMenu');
+      if (hwChip && hwMenu && !hwChip.contains(e.target)) {
+        hwMenu.classList.remove('open');
+      }
       const verChip = document.getElementById('versionChip');
       const verMenu = document.getElementById('customVersionMenu');
       if (verChip && verMenu && !verChip.contains(e.target)) {
@@ -61,6 +66,30 @@ const App = {
   },
 
   selectedQuality: 'balanced',
+  selectedHwdec: 'auto',
+
+  toggleHwdecDropdown(event) {
+    if (event) event.stopPropagation();
+    const menu = document.getElementById('customHwdecMenu');
+    if (menu) menu.classList.toggle('open');
+  },
+
+  selectHwdec(val, event) {
+    if (event) event.stopPropagation();
+    this.selectedHwdec = val;
+    const labelKey = val === 'd3d11va' ? 'hwdecD3d11va' : (val === 'disabled' ? 'hwdecOff' : 'hwdecAuto');
+    const label = I18nManager.t(labelKey);
+    const textEl = document.getElementById('selectedHwdecText');
+    if (textEl) textEl.innerText = `HW: ${label}`;
+
+    document.querySelectorAll('#customHwdecMenu .custom-quality-item').forEach(item => {
+      item.classList.toggle('active', item.getAttribute('data-val') === val);
+    });
+
+    const menu = document.getElementById('customHwdecMenu');
+    if (menu) menu.classList.remove('open');
+    this.saveLaunchOptions();
+  },
 
   toggleQualityDropdown(event) {
     if (event) event.stopPropagation();
@@ -102,6 +131,19 @@ const App = {
       const el = document.getElementById('optRecordScreen');
       if (el) el.checked = (recordScreen === 'true');
     }
+    const audioDup = localStorage.getItem('scrcpy_opt_audio_dup');
+    if (audioDup !== null) {
+      const el = document.getElementById('optAudioDup');
+      if (el) el.checked = (audioDup === 'true');
+    }
+    const hwdec = localStorage.getItem('scrcpy_opt_hwdec') || 'auto';
+    this.selectedHwdec = hwdec;
+    const hwdecLabelKey = hwdec === 'd3d11va' ? 'hwdecD3d11va' : (hwdec === 'disabled' ? 'hwdecOff' : 'hwdecAuto');
+    const hwdecTextEl = document.getElementById('selectedHwdecText');
+    if (hwdecTextEl) hwdecTextEl.innerText = `HW: ${I18nManager.t(hwdecLabelKey)}`;
+    document.querySelectorAll('#customHwdecMenu .custom-quality-item').forEach(item => {
+      item.classList.toggle('active', item.getAttribute('data-val') === hwdec);
+    });
     const quality = localStorage.getItem('scrcpy_opt_quality') || 'balanced';
     const labels = {
       'low': 'Low Latency (720p • 4M)',
@@ -148,10 +190,13 @@ const App = {
     const stayAwake = document.getElementById('optStayAwake')?.checked ?? true;
     const turnScreenOff = document.getElementById('optTurnScreenOff')?.checked ?? false;
     const recordScreen = document.getElementById('optRecordScreen')?.checked ?? false;
+    const audioDup = document.getElementById('optAudioDup')?.checked ?? false;
     localStorage.setItem('scrcpy_opt_stay_awake', stayAwake);
     localStorage.setItem('scrcpy_opt_screen_off', turnScreenOff);
     localStorage.setItem('scrcpy_opt_record_screen', recordScreen);
+    localStorage.setItem('scrcpy_opt_audio_dup', audioDup);
     localStorage.setItem('scrcpy_opt_quality', this.selectedQuality);
+    localStorage.setItem('scrcpy_opt_hwdec', this.selectedHwdec);
     this.updatePresetDescriptions();
   },
 
@@ -477,13 +522,17 @@ const App = {
     const stayAwake = document.getElementById('optStayAwake')?.checked ?? false;
     const turnScreenOff = document.getElementById('optTurnScreenOff')?.checked ?? false;
     const recordScreen = document.getElementById('optRecordScreen')?.checked ?? false;
+    const audioDup = document.getElementById('optAudioDup')?.checked ?? false;
     const quality = this.selectedQuality || 'balanced';
+    const hwdec = this.selectedHwdec || 'auto';
     
     let infoOpts = [];
     if (mode !== 'otg') {
       if (stayAwake) infoOpts.push("Stay Awake");
       if (turnScreenOff) infoOpts.push("Screen Off");
+      if (audioDup) infoOpts.push("Audio Pass-through");
       if (recordScreen) infoOpts.push("Recording MP4");
+      infoOpts.push(`HW: ${hwdec.toUpperCase()}`);
       infoOpts.push(`Quality: ${quality.toUpperCase()}`);
     } else {
       infoOpts.push("Kabel USB Fisik");
@@ -491,7 +540,7 @@ const App = {
     const optStr = ` (${infoOpts.join(', ')})`;
 
     this.log(`Launch [${mode.toUpperCase()}] target: ${target || 'default'}${optStr}`, "info");
-    const res = await window.pywebview.api.launch(mode, target, stayAwake, turnScreenOff, quality, recordScreen);
+    const res = await window.pywebview.api.launch(mode, target, stayAwake, turnScreenOff, quality, recordScreen, hwdec, audioDup);
     const isErr = res.toLowerCase().includes("error") || res.toLowerCase().includes("gagal");
     this.log(res, isErr ? "error" : "success");
     Toast.show(res, isErr ? "error" : "success");

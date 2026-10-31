@@ -152,6 +152,8 @@ class AppController:
         turn_screen_off: bool = False,
         quality: str = "balanced",
         record_screen: bool = False,
+        hwdec: str = "auto",
+        audio_dup: bool = False,
     ) -> str:
         def _handle_log(msg: str):
             if self._window:
@@ -170,6 +172,8 @@ class AppController:
             turn_screen_off=turn_screen_off,
             quality=quality,
             record_screen=record_screen,
+            hwdec=hwdec,
+            audio_dup=audio_dup,
             on_log=_handle_log,
         )
 

@@ -83,6 +83,8 @@ class IScrcpyService(ABC):
         turn_screen_off: bool = False,
         quality: str = "balanced",
         record_screen: bool = False,
+        hwdec: str = "auto",
+        audio_dup: bool = False,
         on_log=None
     ) -> str:
         pass
@@ -276,12 +278,25 @@ class ScrcpyService(IScrcpyService):
             pass
         return 5
 
-    def _build_args(self, mode: str, stay_awake: bool = False, turn_screen_off: bool = False, quality: str = "balanced") -> List[str]:
+    def _build_args(
+        self,
+        mode: str,
+        stay_awake: bool = False,
+        turn_screen_off: bool = False,
+        quality: str = "balanced",
+        hwdec: str = "auto",
+        audio_dup: bool = False
+    ) -> List[str]:
         major = self._get_major_version()
         base_args = ["--video-codec=h264"]
+        
+        # Scrcpy v5+ Hardware Decoding & Adaptive buffering features (backward-compatible fallback for v4)
         if major >= 5 and mode in ["usb", "wifi"]:
-            # scrcpy v5+ introduces native hardware decoding option
-            base_args.append("--hwdec=auto")
+            if hwdec and hwdec != "default":
+                base_args.append(f"--hwdec={hwdec}")
+            if mode == "wifi":
+                base_args.append("--display-buffer=20")
+        
         quality_map = {
             "low": {"size": "720", "bitrate": "4M", "fps": "60"},
             "balanced": {"size": "1080", "bitrate": "8M", "fps": "60"},
@@ -320,6 +335,12 @@ class ScrcpyService(IScrcpyService):
         if mode in ["usb", "wifi"]:
             args.extend(base_args)
 
+        # Audio pass-through / duplication (device + PC simultaneously)
+        if audio_dup and mode in ["usb", "wifi"]:
+            args.append("--audio-dup")
+            if major >= 5:
+                args.append("--audio-source=playback")
+
         if turn_screen_off:
             args.append("-S")
         if stay_awake:
@@ -334,6 +355,8 @@ class ScrcpyService(IScrcpyService):
         turn_screen_off: bool = False,
         quality: str = "balanced",
         record_screen: bool = False,
+        hwdec: str = "auto",
+        audio_dup: bool = False,
         on_log=None
     ) -> str:
         bin_target = self.bin
@@ -358,7 +381,14 @@ class ScrcpyService(IScrcpyService):
         else:
             if device_id:
                 cmd.extend(["-s", device_id.strip()])
-            cmd.extend(self._build_args(mode, stay_awake=stay_awake, turn_screen_off=turn_screen_off, quality=quality))
+            cmd.extend(self._build_args(
+                mode,
+                stay_awake=stay_awake,
+                turn_screen_off=turn_screen_off,
+                quality=quality,
+                hwdec=hwdec,
+                audio_dup=audio_dup
+            ))
 
         record_msg = ""
         if record_screen and mode in ["usb", "wifi"]:
@@ -500,11 +530,21 @@ class ScrcpyUpdaterService(IUpdaterService):
                 tag = rel.get("tag_name", "").lstrip("v")
                 dl = None
                 if sys.platform == "win32":
+                    import platform
+                    is_arm = "arm" in platform.machine().lower()
+                    target_keyword = "win-arm64" if is_arm else "win64"
                     for asset in rel.get("assets", []):
                         name = asset.get("name", "").lower()
-                        if "win64" in name and name.endswith(".zip"):
+                        if target_keyword in name and name.endswith(".zip"):
                             dl = asset.get("browser_download_url")
                             break
+                    # Fallback to win64 if win-arm64 not in older release
+                    if not dl and is_arm:
+                        for asset in rel.get("assets", []):
+                            name = asset.get("name", "").lower()
+                            if "win64" in name and name.endswith(".zip"):
+                                dl = asset.get("browser_download_url")
+                                break
                 elif sys.platform == "darwin":
                     dl = "brew_upgrade"
                 else:
